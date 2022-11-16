@@ -1,280 +1,312 @@
-var canvas = document.getElementById("canvas");
+/*
+Everybody say Happy Birthday! This gift is a compound of various pens plus some other things I added
+- gift 
+https://codepen.io/ElaineXu/pen/EWvGWX
+- neon 
+https://codepen.io/markheggan/pen/LjrVYN
+- fireworks 
+https://codepen.io/chuongdang/pen/yzpDG
+- moon 
+https://codepen.io/agelber/pen/sjIKp
+*/
+window.requestAnimFrame = ( function() {
+	return window.requestAnimationFrame ||
+				window.webkitRequestAnimationFrame ||
+				window.mozRequestAnimationFrame ||
+				function( callback ) {
+					window.setTimeout( callback, 1000 / 60 );
+				};
+})();
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
-
-// Initialize the GL context
-var gl = canvas.getContext('webgl');
-if(!gl){
-  console.error("Unable to initialize WebGL.");
-}
-
-//Time
-var time = 0.0;
-
-//************** Shader sources **************
-
-var vertexSource = `
-attribute vec2 position;
-void main() {
-	gl_Position = vec4(position, 0.0, 1.0);
-}
-`;
-
-var fragmentSource = `
-precision highp float;
-
-uniform float width;
-uniform float height;
-vec2 resolution = vec2(width, height);
-
-uniform float time;
-
-#define POINT_COUNT 8
-
-vec2 points[POINT_COUNT];
-const float speed = -0.5;
-const float len = 0.25;
-float intensity = 1.3;
-float radius = 0.008;
-
-//https://www.shadertoy.com/view/MlKcDD
-//Signed distance to a quadratic bezier
-float sdBezier(vec2 pos, vec2 A, vec2 B, vec2 C){    
-	vec2 a = B - A;
-	vec2 b = A - 2.0*B + C;
-	vec2 c = a * 2.0;
-	vec2 d = A - pos;
-
-	float kk = 1.0 / dot(b,b);
-	float kx = kk * dot(a,b);
-	float ky = kk * (2.0*dot(a,a)+dot(d,b)) / 3.0;
-	float kz = kk * dot(d,a);      
-
-	float res = 0.0;
-
-	float p = ky - kx*kx;
-	float p3 = p*p*p;
-	float q = kx*(2.0*kx*kx - 3.0*ky) + kz;
-	float h = q*q + 4.0*p3;
-
-	if(h >= 0.0){ 
-		h = sqrt(h);
-		vec2 x = (vec2(h, -h) - q) / 2.0;
-		vec2 uv = sign(x)*pow(abs(x), vec2(1.0/3.0));
-		float t = uv.x + uv.y - kx;
-		t = clamp( t, 0.0, 1.0 );
-
-		// 1 root
-		vec2 qos = d + (c + b*t)*t;
-		res = length(qos);
-	}else{
-		float z = sqrt(-p);
-		float v = acos( q/(p*z*2.0) ) / 3.0;
-		float m = cos(v);
-		float n = sin(v)*1.732050808;
-		vec3 t = vec3(m + m, -n - m, n - m) * z - kx;
-		t = clamp( t, 0.0, 1.0 );
-
-		// 3 roots
-		vec2 qos = d + (c + b*t.x)*t.x;
-		float dis = dot(qos,qos);
-        
-		res = dis;
-
-		qos = d + (c + b*t.y)*t.y;
-		dis = dot(qos,qos);
-		res = min(res,dis);
+// now we will setup our basic variables for the demo
+var canvas = document.getElementById( 'canvas' ),
+		ctx = canvas.getContext( '2d' ),
+		// full screen dimensions
+		cw = window.innerWidth,
+		ch = window.innerHeight,
+		// firework collection
+		fireworks = [],
+		// particle collection
+		particles = [],
+		// starting hue
+		hue = 120,
+		// when launching fireworks with a click, too many get launched at once without a limiter, one launch per 5 loop ticks
+		limiterTotal = 5,
+		limiterTick = 0,
+		// this will time the auto launches of fireworks, one launch per 80 loop ticks
+		timerTotal = 80,
+		timerTick = 0,
+		mousedown = false,
+		// mouse x coordinate,
+		mx,
+		// mouse y coordinate
+		my;
 		
-		qos = d + (c + b*t.z)*t.z;
-		dis = dot(qos,qos);
-		res = min(res,dis);
+// set canvas dimensions
+canvas.width = cw;
+canvas.height = ch;
 
-		res = sqrt( res );
+// now we are going to setup our function placeholders for the entire demo
+
+// get a random number within a range
+function random( min, max ) {
+	return Math.random() * ( max - min ) + min;
+}
+
+// calculate the distance between two points
+function calculateDistance( p1x, p1y, p2x, p2y ) {
+	var xDistance = p1x - p2x,
+			yDistance = p1y - p2y;
+	return Math.sqrt( Math.pow( xDistance, 2 ) + Math.pow( yDistance, 2 ) );
+}
+
+// create firework
+function Firework( sx, sy, tx, ty ) {
+	// actual coordinates
+	this.x = sx;
+	this.y = sy;
+	// starting coordinates
+	this.sx = sx;
+	this.sy = sy;
+	// target coordinates
+	this.tx = tx;
+	this.ty = ty;
+	// distance from starting point to target
+	this.distanceToTarget = calculateDistance( sx, sy, tx, ty );
+	this.distanceTraveled = 0;
+	// track the past coordinates of each firework to create a trail effect, increase the coordinate count to create more prominent trails
+	this.coordinates = [];
+	this.coordinateCount = 3;
+	// populate initial coordinate collection with the current coordinates
+	while( this.coordinateCount-- ) {
+		this.coordinates.push( [ this.x, this.y ] );
 	}
-    
-	return res;
+	this.angle = Math.atan2( ty - sy, tx - sx );
+	this.speed = 2;
+	this.acceleration = 1.05;
+	this.brightness = random( 50, 70 );
+	// circle target indicator radius
+	this.targetRadius = 1;
 }
 
-
-//http://mathworld.wolfram.com/HeartCurve.html
-vec2 getHeartPosition(float t){
-	return vec2(16.0 * sin(t) * sin(t) * sin(t),
-							-(13.0 * cos(t) - 5.0 * cos(2.0*t)
-							- 2.0 * cos(3.0*t) - cos(4.0*t)));
-}
-
-//https://www.shadertoy.com/view/3s3GDn
-float getGlow(float dist, float radius, float intensity){
-	return pow(radius/dist, intensity);
-}
-
-float getSegment(float t, vec2 pos, float offset, float scale){
-	for(int i = 0; i < POINT_COUNT; i++){
-		points[i] = getHeartPosition(offset + float(i)*len + fract(speed * t) * 6.28);
-	}
-    
-	vec2 c = (points[0] + points[1]) / 2.0;
-	vec2 c_prev;
-	float dist = 10000.0;
-    
-	for(int i = 0; i < POINT_COUNT-1; i++){
-		//https://tinyurl.com/y2htbwkm
-		c_prev = c;
-		c = (points[i] + points[i+1]) / 2.0;
-		dist = min(dist, sdBezier(pos, scale * c_prev, scale * points[i], scale * c));
-	}
-	return max(0.0, dist);
-}
-
-void main(){
-	vec2 uv = gl_FragCoord.xy/resolution.xy;
-	float widthHeightRatio = resolution.x/resolution.y;
-	vec2 centre = vec2(0.5, 0.5);
-	vec2 pos = centre - uv;
-	pos.y /= widthHeightRatio;
-	//Shift upwards to centre heart
-	pos.y += 0.02;
-	float scale = 0.000015 * height;
+// update firework
+Firework.prototype.update = function( index ) {
+	// remove last item in coordinates array
+	this.coordinates.pop();
+	// add current coordinates to the start of the array
+	this.coordinates.unshift( [ this.x, this.y ] );
 	
-	float t = time;
-    
-	//Get first segment
-  float dist = getSegment(t, pos, 0.0, scale);
-  float glow = getGlow(dist, radius, intensity);
-  
-  vec3 col = vec3(0.0);
-
-	//White core
-  col += 10.0*vec3(smoothstep(0.003, 0.001, dist));
-  //Pink glow
-  col += glow * vec3(1.0,0.05,0.3);
-  
-  //Get second segment
-  dist = getSegment(t, pos, 3.4, scale);
-  glow = getGlow(dist, radius, intensity);
-  
-  //White core
-  col += 10.0*vec3(smoothstep(0.003, 0.001, dist));
-  //Blue glow
-  col += glow * vec3(0.1,0.4,1.0);
-        
-	//Tone mapping
-	col = 1.0 - exp(-col);
-
-	//Gamma
-	col = pow(col, vec3(0.4545));
-
-	//Output to screen
- 	gl_FragColor = vec4(col,1.0);
-}
-`;
-
-//************** Utility functions **************
-
-window.addEventListener('resize', onWindowResize, false);
-
-function onWindowResize(){
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
-	gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.uniform1f(widthHandle, window.innerWidth);
-  gl.uniform1f(heightHandle, window.innerHeight);
-}
-
-
-//Compile shader and combine with source
-function compileShader(shaderSource, shaderType){
-  var shader = gl.createShader(shaderType);
-  gl.shaderSource(shader, shaderSource);
-  gl.compileShader(shader);
-  if(!gl.getShaderParameter(shader, gl.COMPILE_STATUS)){
-  	throw "Shader compile failed with: " + gl.getShaderInfoLog(shader);
-  }
-  return shader;
-}
-
-//From https://codepen.io/jlfwong/pen/GqmroZ
-//Utility to complain loudly if we fail to find the attribute/uniform
-function getAttribLocation(program, name) {
-  var attributeLocation = gl.getAttribLocation(program, name);
-  if (attributeLocation === -1) {
-  	throw 'Cannot find attribute ' + name + '.';
-  }
-  return attributeLocation;
-}
-
-function getUniformLocation(program, name) {
-  var attributeLocation = gl.getUniformLocation(program, name);
-  if (attributeLocation === -1) {
-  	throw 'Cannot find uniform ' + name + '.';
-  }
-  return attributeLocation;
-}
-
-//************** Create shaders **************
-
-//Create vertex and fragment shaders
-var vertexShader = compileShader(vertexSource, gl.VERTEX_SHADER);
-var fragmentShader = compileShader(fragmentSource, gl.FRAGMENT_SHADER);
-
-//Create shader programs
-var program = gl.createProgram();
-gl.attachShader(program, vertexShader);
-gl.attachShader(program, fragmentShader);
-gl.linkProgram(program);
-
-gl.useProgram(program);
-
-//Set up rectangle covering entire canvas 
-var vertexData = new Float32Array([
-  -1.0,  1.0, 	// top left
-  -1.0, -1.0, 	// bottom left
-   1.0,  1.0, 	// top right
-   1.0, -1.0, 	// bottom right
-]);
-
-//Create vertex buffer
-var vertexDataBuffer = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, vertexDataBuffer);
-gl.bufferData(gl.ARRAY_BUFFER, vertexData, gl.STATIC_DRAW);
-
-// Layout of our data in the vertex buffer
-var positionHandle = getAttribLocation(program, 'position');
-
-gl.enableVertexAttribArray(positionHandle);
-gl.vertexAttribPointer(positionHandle,
-  2, 				// position is a vec2 (2 values per component)
-  gl.FLOAT, // each component is a float
-  false, 		// don't normalize values
-  2 * 4, 		// two 4 byte float components per vertex (32 bit float is 4 bytes)
-  0 				// how many bytes inside the buffer to start from
-  );
-
-//Set uniform handle
-var timeHandle = getUniformLocation(program, 'time');
-var widthHandle = getUniformLocation(program, 'width');
-var heightHandle = getUniformLocation(program, 'height');
-
-gl.uniform1f(widthHandle, window.innerWidth);
-gl.uniform1f(heightHandle, window.innerHeight);
-
-var lastFrame = Date.now();
-var thisFrame;
-
-function draw(){
+	// cycle the circle target indicator radius
+	if( this.targetRadius < 8 ) {
+		this.targetRadius += 0.3;
+	} else {
+		this.targetRadius = 1;
+	}
 	
-  //Update time
-	thisFrame = Date.now();
-  time += (thisFrame - lastFrame)/1000;	
-	lastFrame = thisFrame;
-
-	//Send uniforms to program
-  gl.uniform1f(timeHandle, time);
-  //Draw a triangle strip connecting vertices 0-4
-  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-  requestAnimationFrame(draw);
+	// speed up the firework
+	this.speed *= this.acceleration;
+	
+	// get the current velocities based on angle and speed
+	var vx = Math.cos( this.angle ) * this.speed,
+			vy = Math.sin( this.angle ) * this.speed;
+	// how far will the firework have traveled with velocities applied?
+	this.distanceTraveled = calculateDistance( this.sx, this.sy, this.x + vx, this.y + vy );
+	
+	// if the distance traveled, including velocities, is greater than the initial distance to the target, then the target has been reached
+	if( this.distanceTraveled >= this.distanceToTarget ) {
+		createParticles( this.tx, this.ty );
+		// remove the firework, use the index passed into the update function to determine which to remove
+		fireworks.splice( index, 1 );
+	} else {
+		// target not reached, keep traveling
+		this.x += vx;
+		this.y += vy;
+	}
 }
 
-draw();
+// draw firework
+Firework.prototype.draw = function() {
+	ctx.beginPath();
+	// move to the last tracked coordinate in the set, then draw a line to the current x and y
+	ctx.moveTo( this.coordinates[ this.coordinates.length - 1][ 0 ], this.coordinates[ this.coordinates.length - 1][ 1 ] );
+	ctx.lineTo( this.x, this.y );
+	ctx.strokeStyle = 'hsl(' + hue + ', 100%, ' + this.brightness + '%)';
+	ctx.stroke();
+	
+	ctx.beginPath();
+	// draw the target for this firework with a pulsing circle
+	ctx.arc( this.tx, this.ty, this.targetRadius, 0, Math.PI * 2 );
+	ctx.stroke();
+}
+
+// create particle
+function Particle( x, y ) {
+	this.x = x;
+	this.y = y;
+	// track the past coordinates of each particle to create a trail effect, increase the coordinate count to create more prominent trails
+	this.coordinates = [];
+	this.coordinateCount = 5;
+	while( this.coordinateCount-- ) {
+		this.coordinates.push( [ this.x, this.y ] );
+	}
+	// set a random angle in all possible directions, in radians
+	this.angle = random( 0, Math.PI * 2 );
+	this.speed = random( 1, 10 );
+	// friction will slow the particle down
+	this.friction = 0.95;
+	// gravity will be applied and pull the particle down
+	this.gravity = 1;
+	// set the hue to a random number +-20 of the overall hue variable
+	this.hue = random( hue - 20, hue + 20 );
+	this.brightness = random( 50, 80 );
+	this.alpha = 1;
+	// set how fast the particle fades out
+	this.decay = random( 0.015, 0.03 );
+}
+
+// update particle
+Particle.prototype.update = function( index ) {
+	// remove last item in coordinates array
+	this.coordinates.pop();
+	// add current coordinates to the start of the array
+	this.coordinates.unshift( [ this.x, this.y ] );
+	// slow down the particle
+	this.speed *= this.friction;
+	// apply velocity
+	this.x += Math.cos( this.angle ) * this.speed;
+	this.y += Math.sin( this.angle ) * this.speed + this.gravity;
+	// fade out the particle
+	this.alpha -= this.decay;
+	
+	// remove the particle once the alpha is low enough, based on the passed in index
+	if( this.alpha <= this.decay ) {
+		particles.splice( index, 1 );
+	}
+}
+
+// draw particle
+Particle.prototype.draw = function() {
+	ctx. beginPath();
+	// move to the last tracked coordinates in the set, then draw a line to the current x and y
+	ctx.moveTo( this.coordinates[ this.coordinates.length - 1 ][ 0 ], this.coordinates[ this.coordinates.length - 1 ][ 1 ] );
+	ctx.lineTo( this.x, this.y );
+	ctx.strokeStyle = 'hsla(' + this.hue + ', 100%, ' + this.brightness + '%, ' + this.alpha + ')';
+	ctx.stroke();
+}
+
+// create particle group/explosion
+function createParticles( x, y ) {
+	// increase the particle count for a bigger explosion, beware of the canvas performance hit with the increased particles though
+	var particleCount = 30;
+	while( particleCount-- ) {
+		particles.push( new Particle( x, y ) );
+	}
+}
+
+// main demo loop
+function loop() {
+	// this function will run endlessly with requestAnimationFrame
+	requestAnimFrame( loop );
+	
+	// increase the hue to get different colored fireworks over time
+	hue += 0.5;
+	
+	// normally, clearRect() would be used to clear the canvas
+	// we want to create a trailing effect though
+	// setting the composite operation to destination-out will allow us to clear the canvas at a specific opacity, rather than wiping it entirely
+	ctx.globalCompositeOperation = 'destination-out';
+	// decrease the alpha property to create more prominent trails
+	ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+	ctx.fillRect( 0, 0, cw, ch );
+	// change the composite operation back to our main mode
+	// lighter creates bright highlight points as the fireworks and particles overlap each other
+	ctx.globalCompositeOperation = 'lighter';
+	
+	// loop over each firework, draw it, update it
+	var i = fireworks.length;
+	while( i-- ) {
+		fireworks[ i ].draw();
+		fireworks[ i ].update( i );
+	}
+	
+	// loop over each particle, draw it, update it
+	var i = particles.length;
+	while( i-- ) {
+		particles[ i ].draw();
+		particles[ i ].update( i );
+	}
+	
+	// launch fireworks automatically to random coordinates, when the mouse isn't down
+	if( timerTick >= timerTotal ) {
+		if( !mousedown ) {
+			// start the firework at the bottom middle of the screen, then set the random target coordinates, the random y coordinates will be set within the range of the top half of the screen
+			fireworks.push( new Firework( cw / 2, ch, random( 0, cw ), random( 0, ch / 2 ) ) );
+			timerTick = 0;
+		}
+	} else {
+		timerTick++;
+	}
+	
+	// limit the rate at which fireworks get launched when mouse is down
+	if( limiterTick >= limiterTotal ) {
+		if( mousedown ) {
+			// start the firework at the bottom middle of the screen, then set the current mouse coordinates as the target
+			fireworks.push( new Firework( cw / 2, ch, mx, my ) );
+			limiterTick = 0;
+		}
+	} else {
+		limiterTick++;
+	}
+}
+
+window.onload=function(){
+  var merrywrap=document.getElementById("merrywrap");
+  var box=merrywrap.getElementsByClassName("giftbox")[0];
+  var step=1;
+  var stepMinutes=[2000,2000,1000,1000];
+  function init(){
+          box.addEventListener("click",openBox,false);
+  }
+  function stepClass(step){
+    merrywrap.className='merrywrap';
+    merrywrap.className='merrywrap step-'+step;
+  }
+  function openBox(){
+    if(step===1){
+      box.removeEventListener("click",openBox,false); 
+    }  
+    stepClass(step); 
+    if(step===3){ 
+    } 
+    if(step===4){
+        reveal();
+       return;
+    }     
+    setTimeout(openBox,stepMinutes[step-1]);
+    step++;  
+  }
+   
+  init();
+ 
+}
+
+function reveal() {
+  document.querySelector('.merrywrap').style.backgroundColor = 'transparent';
+  
+  loop();
+  
+  var w, h;
+  if(window.innerWidth >= 1000) {
+    w = 295; h = 185;
+  }
+  else {
+    w = 255; h = 155;
+  }
+  
+  var ifrm = document.createElement("iframe");
+        ifrm.setAttribute("src", "https://www.youtube.com/embed/KDxJlW6cxRk?controls=0&loop=1&autoplay=1");
+        //ifrm.style.width = `${w}px`;
+        //ifrm.style.height = `${h}px`;
+        ifrm.style.border = 'none';
+        document.querySelector('#video').appendChild(ifrm);
+}
